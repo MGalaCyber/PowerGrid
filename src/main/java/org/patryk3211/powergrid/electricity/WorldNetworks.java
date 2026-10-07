@@ -577,19 +577,29 @@ public class WorldNetworks extends SavedData implements NetworkGraph.IGraphModif
     }
 
     public ElectricalNetwork prepareForTransmissionLine(@NotNull OwnedFloatingNode node1, @NotNull OwnedFloatingNode node2, TransmissionLine line, Runnable callback) {
+        if(node1 == null || node2 == null) {
+            // Nothing sensible can be done without both nodes, but the callback must still run
+            // so that the caller (transmission line split) is left in a consistent state.
+            PowerGrid.LOGGER.warn("Cannot prepare transmission line {}, a node is missing ({}, {})", line, node1, node2);
+            callback.run();
+            return null;
+        }
+
         var endpoint1 = node1.endpoint;
         var endpoint2 = node2.endpoint;
 
         if(node1 == node2)
             return null;
 
+        // The endpoint might not be able to provide a node (e.g. its block entity is not loaded and the node
+        // is not in the global map). In that case keep using the node we already have instead of crashing.
         var nNode1 = endpoint1.getNode(world);
-        if(node1 != nNode1) {
+        if(nNode1 != null && node1 != nNode1) {
             addAndMigrateNode(node1, nNode1);
             node1 = nNode1;
         }
         var nNode2 = endpoint2.getNode(world);
-        if(node2 != nNode2) {
+        if(nNode2 != null && node2 != nNode2) {
             addAndMigrateNode(node2, nNode2);
             node2 = nNode2;
         }
@@ -609,14 +619,14 @@ public class WorldNetworks extends SavedData implements NetworkGraph.IGraphModif
         }
         if(net1 == null && net2 == null) {
             network = newNetwork();
-            endpoint1.joinNetwork(world, network);
-            endpoint2.joinNetwork(world, network);
+            joinNetworkSafe(endpoint1, node1, network);
+            joinNetworkSafe(endpoint2, node2, network);
         } else if(net1 == null) {
             network = net2;
-            endpoint1.joinNetwork(world, network);
+            joinNetworkSafe(endpoint1, node1, network);
         } else if(net2 == null) {
             network = net1;
-            endpoint2.joinNetwork(world, network);
+            joinNetworkSafe(endpoint2, node2, network);
         } else if(net1 != net2) {
             if(net1.size() >= net2.size()) {
                 network = net1;
@@ -1104,13 +1114,18 @@ public class WorldNetworks extends SavedData implements NetworkGraph.IGraphModif
         if(ModdedConfigs.logsEnabled())
             PowerGrid.LOGGER.debug("Node holder added, {}", ownedNode);
         addAndMigrateNode(ownedNode.endpoint);
-        // Try to resolve an end of a transmission line
-        resolveTree(ownedNode.endpoint);
-        if(hasInternals) {
-            var line = findLineMiddle(ownedNode);
-            if(line != null) {
-                line.splitAt(ownedNode);
+        // A failure while rebuilding transmission lines must never take the whole server down.
+        try {
+            // Try to resolve an end of a transmission line
+            resolveTree(ownedNode.endpoint);
+            if(hasInternals) {
+                var line = findLineMiddle(ownedNode);
+                if(line != null) {
+                    line.splitAt(ownedNode);
+                }
             }
+        } catch(RuntimeException e) {
+            PowerGrid.LOGGER.error("Failed to resolve transmission lines for node holder {}, skipping", ownedNode, e);
         }
     }
 
@@ -1231,8 +1246,19 @@ public class WorldNetworks extends SavedData implements NetworkGraph.IGraphModif
                 network.merge(node.getNetwork());
             }
         } else {
-            node.endpoint.joinNetwork(world, network);
+            joinNetworkSafe(node.endpoint, node, network);
         }
+    }
+
+    /**
+     * Joins a node to a network through its endpoint. If the endpoint can no longer resolve this exact node
+     * (unloaded chunk, stale node), the node is added to the network directly so it is not silently dropped.
+     */
+    private void joinNetworkSafe(IWireEndpoint endpoint, OwnedFloatingNode node, ElectricalNetwork network) {
+        if(endpoint.getNode(world) == node)
+            endpoint.joinNetwork(world, network);
+        else if(node.getNetwork() == null)
+            network.addNode(node);
     }
 
     public void movePartMap(OwnedFloatingNode oldNode, OwnedFloatingNode newNode, TransmissionLinePart part) {
