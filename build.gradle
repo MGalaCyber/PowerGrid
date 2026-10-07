@@ -241,6 +241,8 @@ subprojects {
 	}
 
 	tasks.named("sourcesJar") {
+		// Some resources exist both in common and in the generated sources (e.g. solar_biome_override/example.txt).
+		duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 		def commonSources = rootProject.sourcesJar
 		dependsOn commonSources
 		from commonSources.archiveFile.map { zipTree(it) }
